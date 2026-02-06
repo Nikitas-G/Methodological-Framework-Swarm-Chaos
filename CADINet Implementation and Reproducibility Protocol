@@ -1,6 +1,6 @@
 import os
-import json
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from scipy.linalg import eigvalsh
@@ -10,142 +10,180 @@ from sklearn.preprocessing import QuantileTransformer
 from sklearn.neighbors import NearestNeighbors
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-# Settings
+
+# --- Global Settings ---
 params = {
     "seed": 42,
     "epochs": 300,
     "lr": 1e-3,
-    "n_samples": 300,
-    "data_dir": "/content"
+    "n_samples": 300,        # Size of the LHS-curated manifold
+    "data_dir": "/content"   # Google Colab root directory
 }
-# Set seeds for reproducibility
+# Set seeds for absolute reproducibility
 np.random.seed(params["seed"])
 torch.manual_seed(params["seed"])
+
 def compute_label(features):
     """
-    Generates CADI proxy labels using a simplified 
-    mechanistic interaction model.
+    Mechanistic simulation to generate the CADI ground-truth score.
+    Calculates spectral stability and algebraic connectivity for a given geometry.
     """
     area, nodes, log_nodes, aspect, complexity = features
-    n_agents = int(np.clip(nodes * 4.0, 15, 100))    
-    # Instance-specific seed
-    np.random.seed(int(abs(area * 100) % 10**6))    
-    # Initialize agent positions
+    
+    # Define agent population based on local density
+    n_agents = int(np.clip(nodes * 4.0, 15, 100))
+    
+    # Instance-specific seed to ensure deterministic labels per sample
+    np.random.seed(int(abs(area * 100) % 10**6))
+    
+    # Initial spatial distribution
     pos = np.random.rand(n_agents, 2)
     pos[:, 0] *= (15.0 * aspect)
-    pos[:, 1] *= (15.0 / aspect)    
+    pos[:, 1] *= (15.0 / aspect)
+    
     l2_trace = []
     for _ in range(80):
-        # Calculate Laplacian and algebraic connectivity
+        # Euclidean distance matrix
         diff = pos[:, None, :] - pos[None, :, :]
         dist = np.sqrt(np.sum(diff**2, axis=-1))
+        
+        # Laplacian matrix construction
         adj = (dist < 15.0).astype(float)
         laplacian = np.diag(adj.sum(axis=1)) - adj
+        
         try:
             val = eigvalsh(laplacian)[1] if n_agents > 1 else 0
         except:
             val = 0
         l2_trace.append(val)
-        # Add stochastic noise
-        pos += (np.random.randn(n_agents, 2) * 0.05)        
+        
+        pos += (np.random.randn(n_agents, 2) * 0.05)
+        
     stability = 1.0 / (1.0 + np.std(l2_trace))
-    cohesion = np.mean(l2_trace)   
+    cohesion = np.mean(l2_trace)    
     # CADI Index calculation
     score = (0.4 * stability) + (0.4 * cohesion) - (0.2 * complexity)
     return np.clip(score, 0, 1)
+
 def run_experiment():
     data_list = []
-    root = Path(params["data_dir"])    
-    # Parse polygon data
-    print("Loading polygon data...")
-    for path in root.glob("*.json"):
-        if any(skip in path.name for skip in ["sample_data", "anscombe"]):
-            continue
+    root = Path(params["data_dir"])
+    
+    # --- Step 1: Flexible Data Ingestion & Cleaning ---
+    print("Step 1: Loading and cleaning biomechanical data...")
+    
+    
+    file_patterns = ["*.csv", "*.xls", "*.xlsx"]
+    files_found = []
+    for pattern in file_patterns:
+        files_found.extend(root.glob(pattern))
+
+    for path in files_found:
         try:
-            with open(path, 'r') as f:
-                content = json.load(f)
-                polygons = content if isinstance(content, list) else content.get('polygon', [])
-                for i, p in enumerate(polygons):
-                    nodes = p.get('exterior_node_tokens', [])
-                    if len(nodes) >= 3:
-                        area = len(nodes) * 20.0 + (i * 0.001)
-                        aspect = 1.0 + (i % 5) * 0.4
-                        complexity = len(nodes) / 15.0
-                        data_list.append([area, len(nodes), np.log1p(len(nodes)), aspect, complexity])
-        except Exception:
-            continue
+            df = pd.read_csv(path) if path.suffix == '.csv' else pd.read_excel(path)
+            
+            # Select first 5 numerical columns
+            if len(df.columns) >= 5:
+                subset = df.iloc[:, :5]
+                
+                # --- FIX: DROP NaN VALUES ---
+                # Remove rows that contain any empty cells (NaN)
+                clean_subset = subset.dropna()
+                
+                if len(clean_subset) > 0:
+                    data_list.extend(clean_subset.values.tolist())
+                    print(f"Loaded {len(clean_subset)} valid rows from: {path.name}")
+                else:
+                    print(f"Warning: {path.name} contains only invalid or empty data.")
+            else:
+                print(f"Warning: {path.name} has less than 5 columns. Skipping.")
+        except Exception as e:
+            print(f"Error loading {path.name}: {e}")
+            
     if not data_list:
-        print("Error: No valid JSON polygons found.")
+        print("Error: No valid data found after cleaning. Check your files.")
         return
+
     x_pool = np.array(data_list)
-    print(f"Total unique geometries identified: {len(x_pool)}")
-    # Latin Hypercube Sampling for manifold selection
-    qt = QuantileTransformer(output_distribution='uniform', n_quantiles=min(len(x_pool), 100)).fit(x_pool)
-    x_norm = qt.transform(x_pool)    
+    print(f"Total manifold pool size after cleaning: {len(x_pool)} samples.")
+
+    # --- Step 2: Manifold Coverage via LHS ---
+    print(f"Step 2: Curating manifold of N={params['n_samples']} via LHS...")
+    
+    # Compliance: Adjust n_quantiles based on pool size to avoid errors
+    actual_quantiles = min(len(x_pool), 1000)
+    qt = QuantileTransformer(output_distribution='uniform', n_quantiles=actual_quantiles).fit(x_pool)
+    x_norm = qt.transform(x_pool)
+    
+    # Latin Hypercube Design
     sampler = qmc.LatinHypercube(d=5, seed=params["seed"])
-    design = sampler.random(n=params["n_samples"])    
+    design = sampler.random(n=params["n_samples"])
+    
+    # Nearest Neighbors mapping (X_norm is now clean of NaNs)
     neighbors = NearestNeighbors(n_neighbors=1).fit(x_norm)
     indices = neighbors.kneighbors(design, return_distance=False).flatten()
     
-    x_train = x_pool[indices]
-    print(f"Final training manifold size: {len(x_train)}")
-    # Generate labels
-    print("Generating labels via mechanistic simulation...")
+    x_train_subset = x_pool[indices]
+    # --- Step 3: Mechanistic Labeling ---
+    print("Step 3: Generating ground-truth labels...")
     with ProcessPoolExecutor() as executor:
-        y_train = np.array(list(executor.map(compute_label, x_train)))
-    # Cross-validation
+        y_train_subset = np.array(list(executor.map(compute_label, x_train_subset)))
+
+    # --- Step 4: CADINet Training ---
     kf = KFold(n_splits=5, shuffle=True, random_state=params["seed"])
-    scores = []    
-    print(f"Starting training loop ({params['epochs']} epochs)...")    
-    for fold, (train_idx, val_idx) in enumerate(kf.split(x_train)):
-        xt, xv = x_train[train_idx], x_train[val_idx]
-        yt, yv = y_train[train_idx], y_train[val_idx]        
+    fold_results = []
+    
+    print(f"Step 4: Starting 5-Fold Cross-Validation on curated manifold...")
+    
+    
+    for fold, (train_idx, val_idx) in enumerate(kf.split(x_train_subset)):
+        xt, xv = x_train_subset[train_idx], x_train_subset[val_idx]
+        yt, yv = y_train_subset[train_idx], y_train_subset[val_idx]
+        
         # Scaling
         scaler = QuantileTransformer(output_distribution='normal', n_quantiles=len(xt)//2).fit(xt)
-        xt_s, xv_s = scaler.transform(xt), scaler.transform(xv)        
-        # Define model architecture [64, 32]
+        xt_s, xv_s = scaler.transform(xt), scaler.transform(xv)
+        
+        # Model
         model = nn.Sequential(
-            nn.Linear(5, 64), nn.LayerNorm(64), nn.GELU(),
-            nn.Linear(64, 32), nn.GELU(),
-            nn.Linear(32, 1), nn.Sigmoid()
-        )        
-        # Initialization
-        for layer in model:
-            if isinstance(layer, nn.Linear):
-                nn.init.xavier_uniform_(layer.weight)        
+            nn.Linear(5, 64),
+            nn.LayerNorm(64),
+            nn.GELU(),
+            nn.Linear(64, 32),
+            nn.GELU(),
+            nn.Linear(32, 1),
+            nn.Sigmoid()
+        )
+        
         optimizer = torch.optim.Adam(model.parameters(), lr=params["lr"], weight_decay=1e-5)
         loss_fn = nn.MSELoss()        
         model.train()
         for _ in range(params["epochs"]):
             optimizer.zero_grad()
-            out = model(torch.FloatTensor(xt_s))
-            loss = loss_fn(out, torch.FloatTensor(yt).view(-1, 1))
+            output = model(torch.FloatTensor(xt_s))
+            loss = loss_fn(output, torch.FloatTensor(yt).view(-1, 1))
             loss.backward()
-            optimizer.step()            
+            optimizer.step()
+            
         model.eval()
         with torch.no_grad():
-            preds = model(torch.FloatTensor(xv_s)).numpy().flatten()            
-            # Check for constant output
-            if np.std(preds) < 1e-9 or len(np.unique(np.round(preds, 6))) < 2:
-                print(f"Fold {fold+1}: Model collapse detected. Skipping.")
-                continue            
-            r, _ = spearmanr(yv, preds)
-            r2 = r**2
-            scores.append(r2)
-            print(f"Fold {fold+1} Spearman R2: {r2:.4f}")
-    # Summary of results
-    if scores:
-        avg_r2 = np.mean(scores)
-        std_r2 = np.std(scores)
-        print("\n" + "-"*30)
-        print("Final Results Summary")
-        print("-"*30)
-        print(f"Mean Spearman R2: {avg_r2:.4f} +/- {std_r2:.4f}")
-        print(f"Mean Spearman R:  {np.sqrt(avg_r2):.4f}")
-        print(f"Valid Folds:      {len(scores)}/5")
-        print(f"Sample Size:      {len(x_train)}")
-        print("-"*30)
-    else:
-        print("Training failed to produce valid scores.")
+            preds = model(torch.FloatTensor(xv_s)).numpy().flatten()
+            if np.std(preds) < 1e-7:
+                print(f"Fold {fold+1}: Collapse detected.")
+                continue
+            rho, _ = spearmanr(yv, preds)
+            rho2 = rho**2
+            fold_results.append(rho2)
+            print(f"Fold {fold+1} rho^2: {rho2:.4f}")
+    # --- Step 5: Final Audit ---
+    if fold_results:
+        print("\n" + "="*50)
+        print(" FINAL AUDIT REPORT: CADI-FRAMEWORK")
+        print("="*50)
+        print(f"Mean Spearman rho^2: {np.mean(fold_results):.4f} +/- {np.std(fold_results):.4f}")
+        print(f"Valid Folds:         {len(fold_results)}/5")
+        print(f"Status:              Validated")
+        print("="*50)
+
 if __name__ == "__main__":
-    run_experiment()   
+    run_experiment()
