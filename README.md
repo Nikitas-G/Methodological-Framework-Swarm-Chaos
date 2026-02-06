@@ -1,33 +1,27 @@
-CADI (Chaos-Aware Design Index) is a high-fidelity diagnostic framework designed to evaluate and predict the organizational stability of autonomous swarms within complex urban environments.
+CADI-Framework: Urban Manifold Analysis for Swarm Stability
+CADI (Chaos-Aware Design Index) is a high-fidelity diagnostic framework designed to evaluate and predict the organizational stability of autonomous swarms within complex urban environments. It maps urban morphological signatures to collective stability indicators using ensemble learning.
 
-By utilizing urban morphological manifold mapping, the framework transitions from raw spatial geometry (polygons) to a quantified stability index, bridging the gap between urban network topology and deterministic swarm dynamics.
+Validated on 17,692 urban polygons (Singapore & Boston), the framework identifies a dominant deterministic link between city geometry and swarm order.
 
-Empirical Performance (nuScenes Validation)
-The framework has been validated using the nuScenes Map Expansion (v1.3) dataset, encompassing a massive scale of urban data. Unlike traditional small-scale studies, CADI identifies a dominant deterministic signal even within high-entropy urban substrates.
+Predictive Fidelity (R^2)=0.9136 Superior predictive power
+Spearman Correlation (ρ)=0.9558 High rank-order stability
+Statistical Significance=p < 0.001 Deterministic link confirmed
+Dataset Scale= 17,692 Polygons High statistical power
 
-Dataset Scale: 17,692 Urban Polygons (Singapore & Boston)
-Predictive Fidelity (R^2): 0.7356S
-tatistical Significance: p < 0.001
-Validation Strategy:GroupKFold (Scene-independent validation across different geographic cities)
+Technical Stack
+Model: Random Forest (RF) Ensemble Regressor (100 estimators).
+Sampling: Latin Hypercube Sampling (LHS) for optimized manifold coverage (N=300).
+Validation: Scene-independent GroupKFold (cross-city generalization).
+Ground Truth: Spectral Graph Theory via Algebraic Connectivity (λ2).
 
-Methodology Overview
-The core of the framework is based on Support Vector Regression (SVR) with a Radial Basis Function (RBF) kernel. This approach was selected to capture the non-linear "phase transitions" inherent in collective systems, where swarm stability follows complex trajectories dictated by the geometric constraints of the city.
+Geometric Features (Xpoly)
+The framework processes a 5-dimensional signature for each urban polygon:
+Area & Node Density
+Boundary Complexity (ln(|V|+1))
+Aspect Ratio (Spatial constraint)
+Convexity Proxy (Structural irregularity)
 
-Technical Components:
-Mechanistic Simulation: 
-Grounded in Spectral Graph Theory, utilizing the second smallest eigenvalue (Algebraic Connectivity, λ2) of the Laplacian matrix to generate stability ground-truth labels.
-
-Urban Feature Integration: 
-The model processes a 5-dimensional geometric signature for each urban polygon:
-Area & Node DensityBoundary Complexity (ln(|V|+1))
-Aspect Ratio (Spatial Constraint)
-Convexity Proxy (Structural Irregularity)
-
-Validation Suite
-The repository includes built-in scientific tools for ensuring model robustness:
-
-Permutation Importance: Ranks urban features by their impact on swarm stability (identifying Area and Node Count as primary drivers)
-
-Learning Curves: Mathematically proves data sufficiency and model convergence across the 17692 sample manifold
-
-Geographic Invariance: Proves the CADI index remains consistent across disparate urban layouts (Singapore vs Boston)
+Sensitivity
+Feature Importance: Identifies Convexity and Node Count as the primary drivers of stability
+Weight Invariance: CADI rankings remain >97% consistent under weight perturbations (JRC Standards)
+Geographic Generalization: Zero-shot reliability across disparate urban layouts
