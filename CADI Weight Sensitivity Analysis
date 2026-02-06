@@ -1,0 +1,38 @@
+import numpy as np
+from scipy.stats import spearmanr
+
+def run_weight_sensitivity(stability, cohesion, entropy, n_iterations=1000):
+    """
+    Checks if CADI rankings remain consistent under weight perturbations.
+    """
+    # 1. Original CADI scores (Baseline Weights: 0.4, 0.4, 0.2)
+    base_cadi = (0.4 * stability) + (0.4 * cohesion) - (0.2 * entropy)
+    
+    correlations = []
+    
+    for _ in range(n_iterations):
+        # 2. Apply ±15% random noise to the weights (w1 and w2)
+        # Random weights between 0.34 and 0.46
+        w1 = np.random.uniform(0.34, 0.46)
+        w2 = np.random.uniform(0.34, 0.46)
+        w3 = 1.0 - (w1 + w2) # Ensure sum is 1.0
+        
+        # 3. Calculate perturbed CADI
+        perturbed_cadi = (w1 * stability) + (w2 * cohesion) - (w3 * entropy)
+        
+        # 4. Compare ranking consistency using Spearman Rho
+        rho, _ = spearmanr(base_cadi, perturbed_cadi)
+        correlations.append(rho)
+    
+    # 5. Output Results
+    print(f"Sensitivity Results ({n_iterations} iterations):")
+    print(f"Mean Spearman Correlation (Consistency): {np.mean(correlations):.4f}")
+    print(f"95% Confidence Interval: [{np.percentile(correlations, 2.5):.4f}, {np.percentile(correlations, 97.5):.4f}]")
+
+# --- TEST EXECUTION ---
+# Generating 17692 dummy samples to simulate your nuScenes dataset
+S_array = np.random.rand(17692)  # Stability
+L2_array = np.random.rand(17692) # Cohesion (Lambda 2)
+H_array = np.random.rand(17692)  # Entropy
+
+run_weight_sensitivity(S_array, L2_array, H_array)
