@@ -1,0 +1,26 @@
+import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.ensemble import RandomForestRegressor
+
+# 1. Setup Data (Replace with your actual X and y)
+# X should be your (17692, 5) matrix of urban features
+features = ['Area', 'Node Count', 'ln(V+1)', 'Aspect Ratio', 'Convexity']
+X = np.random.rand(17692, 5) 
+y = np.random.rand(17692)
+
+# 2. Train Random Forest (100 estimators as per methodology)
+rf = RandomForestRegressor(n_estimators=100, random_state=42)
+rf.fit(X, y)
+
+# 3. Extract and Plot Feature Importance
+importances = rf.feature_importances_
+indices = np.argsort(importances)[::-1]
+
+plt.figure(figsize=(8, 5))
+plt.title("Feature Importance: Urban Geometry vs. Swarm Stability")
+plt.bar(range(X.shape[1]), importances[indices], color='slategray', align="center")
+plt.xticks(range(X.shape[1]), [features[i] for i in indices], rotation=30)
+plt.ylabel("Importance Score")
+plt.grid(axis='y', linestyle='--', alpha=0.6)
+plt.tight_layout()
+plt.show()
