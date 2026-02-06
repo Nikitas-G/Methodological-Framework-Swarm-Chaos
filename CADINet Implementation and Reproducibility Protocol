@@ -1,0 +1,151 @@
+import os
+import json
+import numpy as np
+import torch
+import torch.nn as nn
+from scipy.linalg import eigvalsh
+from scipy.stats import spearmanr, qmc
+from sklearn.model_selection import KFold
+from sklearn.preprocessing import QuantileTransformer
+from sklearn.neighbors import NearestNeighbors
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+# Settings
+params = {
+    "seed": 42,
+    "epochs": 300,
+    "lr": 1e-3,
+    "n_samples": 300,
+    "data_dir": "/content"
+}
+# Set seeds for reproducibility
+np.random.seed(params["seed"])
+torch.manual_seed(params["seed"])
+def compute_label(features):
+    """
+    Generates CADI proxy labels using a simplified 
+    mechanistic interaction model.
+    """
+    area, nodes, log_nodes, aspect, complexity = features
+    n_agents = int(np.clip(nodes * 4.0, 15, 100))    
+    # Instance-specific seed
+    np.random.seed(int(abs(area * 100) % 10**6))    
+    # Initialize agent positions
+    pos = np.random.rand(n_agents, 2)
+    pos[:, 0] *= (15.0 * aspect)
+    pos[:, 1] *= (15.0 / aspect)    
+    l2_trace = []
+    for _ in range(80):
+        # Calculate Laplacian and algebraic connectivity
+        diff = pos[:, None, :] - pos[None, :, :]
+        dist = np.sqrt(np.sum(diff**2, axis=-1))
+        adj = (dist < 15.0).astype(float)
+        laplacian = np.diag(adj.sum(axis=1)) - adj
+        try:
+            val = eigvalsh(laplacian)[1] if n_agents > 1 else 0
+        except:
+            val = 0
+        l2_trace.append(val)
+        # Add stochastic noise
+        pos += (np.random.randn(n_agents, 2) * 0.05)        
+    stability = 1.0 / (1.0 + np.std(l2_trace))
+    cohesion = np.mean(l2_trace)   
+    # CADI Index calculation
+    score = (0.4 * stability) + (0.4 * cohesion) - (0.2 * complexity)
+    return np.clip(score, 0, 1)
+def run_experiment():
+    data_list = []
+    root = Path(params["data_dir"])    
+    # Parse polygon data
+    print("Loading polygon data...")
+    for path in root.glob("*.json"):
+        if any(skip in path.name for skip in ["sample_data", "anscombe"]):
+            continue
+        try:
+            with open(path, 'r') as f:
+                content = json.load(f)
+                polygons = content if isinstance(content, list) else content.get('polygon', [])
+                for i, p in enumerate(polygons):
+                    nodes = p.get('exterior_node_tokens', [])
+                    if len(nodes) >= 3:
+                        area = len(nodes) * 20.0 + (i * 0.001)
+                        aspect = 1.0 + (i % 5) * 0.4
+                        complexity = len(nodes) / 15.0
+                        data_list.append([area, len(nodes), np.log1p(len(nodes)), aspect, complexity])
+        except Exception:
+            continue
+    if not data_list:
+        print("Error: No valid JSON polygons found.")
+        return
+    x_pool = np.array(data_list)
+    print(f"Total unique geometries identified: {len(x_pool)}")
+    # Latin Hypercube Sampling for manifold selection
+    qt = QuantileTransformer(output_distribution='uniform', n_quantiles=min(len(x_pool), 100)).fit(x_pool)
+    x_norm = qt.transform(x_pool)    
+    sampler = qmc.LatinHypercube(d=5, seed=params["seed"])
+    design = sampler.random(n=params["n_samples"])    
+    neighbors = NearestNeighbors(n_neighbors=1).fit(x_norm)
+    indices = neighbors.kneighbors(design, return_distance=False).flatten()
+    
+    x_train = x_pool[indices]
+    print(f"Final training manifold size: {len(x_train)}")
+    # Generate labels
+    print("Generating labels via mechanistic simulation...")
+    with ProcessPoolExecutor() as executor:
+        y_train = np.array(list(executor.map(compute_label, x_train)))
+    # Cross-validation
+    kf = KFold(n_splits=5, shuffle=True, random_state=params["seed"])
+    scores = []    
+    print(f"Starting training loop ({params['epochs']} epochs)...")    
+    for fold, (train_idx, val_idx) in enumerate(kf.split(x_train)):
+        xt, xv = x_train[train_idx], x_train[val_idx]
+        yt, yv = y_train[train_idx], y_train[val_idx]        
+        # Scaling
+        scaler = QuantileTransformer(output_distribution='normal', n_quantiles=len(xt)//2).fit(xt)
+        xt_s, xv_s = scaler.transform(xt), scaler.transform(xv)        
+        # Define model architecture [64, 32]
+        model = nn.Sequential(
+            nn.Linear(5, 64), nn.LayerNorm(64), nn.GELU(),
+            nn.Linear(64, 32), nn.GELU(),
+            nn.Linear(32, 1), nn.Sigmoid()
+        )        
+        # Initialization
+        for layer in model:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)        
+        optimizer = torch.optim.Adam(model.parameters(), lr=params["lr"], weight_decay=1e-5)
+        loss_fn = nn.MSELoss()        
+        model.train()
+        for _ in range(params["epochs"]):
+            optimizer.zero_grad()
+            out = model(torch.FloatTensor(xt_s))
+            loss = loss_fn(out, torch.FloatTensor(yt).view(-1, 1))
+            loss.backward()
+            optimizer.step()            
+        model.eval()
+        with torch.no_grad():
+            preds = model(torch.FloatTensor(xv_s)).numpy().flatten()            
+            # Check for constant output
+            if np.std(preds) < 1e-9 or len(np.unique(np.round(preds, 6))) < 2:
+                print(f"Fold {fold+1}: Model collapse detected. Skipping.")
+                continue            
+            r, _ = spearmanr(yv, preds)
+            r2 = r**2
+            scores.append(r2)
+            print(f"Fold {fold+1} Spearman R2: {r2:.4f}")
+    # Summary of results
+    if scores:
+        avg_r2 = np.mean(scores)
+        std_r2 = np.std(scores)
+        print("\n" + "-"*30)
+        print("Final Results Summary")
+        print("-"*30)
+        print(f"Mean Spearman R2: {avg_r2:.4f} +/- {std_r2:.4f}")
+        print(f"Mean Spearman R:  {np.sqrt(avg_r2):.4f}")
+        print(f"Valid Folds:      {len(scores)}/5")
+        print(f"Sample Size:      {len(x_train)}")
+        print("-"*30)
+    else:
+        print("Training failed to produce valid scores.")
+if __name__ == "__main__":
+    run_experiment()   
